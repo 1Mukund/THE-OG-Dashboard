@@ -1,16 +1,17 @@
+# app.py
+
 import streamlit as st
 import pandas as pd
 import gspread
 import re
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-from io import BytesIO
 
 # --- Streamlit Page Config ---
-st.set_page_config(page_title="Unified Project Dashboard", layout="wide")
-st.title("📊 Unified Lead + Web Events Dashboard")
+st.set_page_config(page_title="Unified Lead Dashboard", layout="wide")
+st.title("📊 Unified Lead + Web Behavior Dashboard")
 
-# --- Google Sheets Auth ---
+# --- Auth + Load GSheet ---
 @st.cache_resource
 def load_sheet(sheet_url):
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -21,105 +22,126 @@ def load_sheet(sheet_url):
     sheet_id = re.findall(r"/d/([a-zA-Z0-9-_]+)", sheet_url)[0]
     return client.open_by_key(sheet_id)
 
-# --- Auto-load all basic project sheets ---
+# --- Fetch Basic Data ---
 @st.cache_data
-def load_all_basic_data():
-    sheets = {
-        "Broadway": st.secrets["BROADWAY_BASIC_URL"],
-        "Loft_Part1": st.secrets["LOFT_PART1_BASIC_URL"],
-        "Loft_Part2": st.secrets["LOFT_PART2_BASIC_URL"],
-        "Spectra": st.secrets["SPECTRA_BASIC_URL"],
-        "Springs": st.secrets["SPRINGS_BASIC_URL"],
-        "Landmark": st.secrets["LANDMARK_BASIC_URL"]
-    }
-    data = {}
+def fetch_basic_data():
+    sheets = st.secrets["google_sheets"]
+    dfs = []
     for name, url in sheets.items():
+        sheet = load_sheet(url)
         try:
-            sheet = load_sheet(url)
             df = pd.DataFrame(sheet.sheet1.get_all_records())
-            df['Project'] = name
-            data[name] = df
-        except Exception as e:
-            st.warning(f"Couldn't load sheet for {name}: {e}")
-    return pd.concat(data.values(), ignore_index=True)
+            df['Project'] = name.replace('_', ' ').title()
+            dfs.append(df)
+        except:
+            st.warning(f"❌ Could not fetch: {name}")
+    return pd.concat(dfs, ignore_index=True)
 
-# --- Upload Web Events ---
-uploaded_events = st.file_uploader("📤 Upload Web Events Sheet (.xlsx)", type=["xlsx"])
-basic_data = load_all_basic_data()
+# --- Page-level KPI Calculations ---
+def calculate_web_metrics(df):
+    page_cols = ['Home', 'Plans', 'Price', 'Location', 'Specification', 'Amenities', 'Media']
+    df[page_cols] = df[page_cols].fillna(0)
+    df['Page Depth'] = (df[page_cols] > 0).sum(axis=1)
+    df['Total Time'] = df[page_cols].sum(axis=1)
+    df['Last Active'] = pd.to_datetime(df['Last Event Timestamp'], errors='coerce')
+    df['Recency (Days)'] = (datetime.now() - df['Last Active']).dt.days
+    return df
 
-# --- Process Web Events ---
-if uploaded_events:
-    events_df = pd.read_excel(uploaded_events, sheet_name=None)
-    web_df = events_df.get("Main")
-
-    if web_df is None:
-        st.error("❌ 'Main' sheet not found in uploaded file.")
-        st.stop()
-
-    # Match by masterLeadId
-    merged_df = basic_data.merge(web_df, on="masterLeadId", how="left")
-
-    st.success(f"✅ Merged {len(merged_df)} leads. Displaying combined dashboard...")
-
-    # --- Sidebar Filters ---
+# --- Filters ---
+def apply_filters(df, web_df):
     st.sidebar.header("🔍 Filters")
-    call_duration = st.sidebar.slider("Min Call Duration", 0, 1000, 0)
-    score_range = st.sidebar.slider("Score Range", 0.0, 1.0, (0.0, 1.0))
-    micro = st.sidebar.multiselect("Micro Market", merged_df["Micro Market"].dropna().unique())
-    source = st.sidebar.multiselect("Source", merged_df["Source"].dropna().unique())
 
-    # Orange-only filters
-    orange_only = st.sidebar.checkbox("🟠 Orange Leads Only")
-    orange_fields = ["Buying Reason", "SFT", "Budget", "Floor", "Handover", "SiteVisitPreference"]
+    # Project
+    proj_options = sorted(df['Project'].unique())
+    project = st.sidebar.selectbox("Select Project", proj_options)
+    df = df[df['Project'] == project]
 
-    # Page-level filters (example for Home/Price page)
-    st.sidebar.subheader("📄 Page Filters")
-    page = st.sidebar.selectbox("Select Page", ["Home", "Plans", "Price", "Location", "Specification", "Amenities", "Media"])
-    operator = st.sidebar.selectbox("Condition", [">", ">=", "=", "<", "<="])
-    page_time = st.sidebar.number_input("Time (seconds)", min_value=0)
+    # Call Duration
+    if 'Call Duration' in df:
+        call_min, call_max = int(df['Call Duration'].min()), int(df['Call Duration'].max())
+        call_filter = st.sidebar.slider("Call Duration (min)", call_min, call_max, (call_min, call_max))
+        df = df[df['Call Duration'].between(*call_filter)]
 
-    # --- Filtering Logic ---
-    filtered = merged_df.copy()
-    filtered = filtered[filtered["Call Duration"] >= call_duration]
-    filtered = filtered[(filtered["Score"] >= score_range[0]) & (filtered["Score"] <= score_range[1])]
-    if micro:
-        filtered = filtered[filtered["Micro Market"].isin(micro)]
-    if source:
-        filtered = filtered[filtered["Source"].isin(source)]
-    if orange_only:
-        filtered = filtered[filtered["Orange"] == True]
-        for field in orange_fields:
-            values = st.sidebar.multiselect(field, filtered[field].dropna().unique())
-            if values:
-                filtered = filtered[filtered[field].isin(values)]
-    if page:
-        col = page + " Page Time"
-        if col in filtered.columns:
-            if operator == ">":
-                filtered = filtered[filtered[col] > page_time]
-            elif operator == ">=":
-                filtered = filtered[filtered[col] >= page_time]
-            elif operator == "=":
-                filtered = filtered[filtered[col] == page_time]
-            elif operator == "<":
-                filtered = filtered[filtered[col] < page_time]
-            elif operator == "<=":
-                filtered = filtered[filtered[col] <= page_time]
+    # Score Bucket
+    if 'Score' in df:
+        score_filter = st.sidebar.slider("Score Range", 0.0, 1.0, (0.0, 1.0))
+        df = df[df['Score'].between(*score_filter)]
 
-    # --- Web Events KPI ---
-    st.subheader("📊 Web Behavior KPIs")
-    web_cols = [c for c in merged_df.columns if c.endswith("Page Time")]
-    filtered["Page Depth"] = filtered[web_cols].notna().sum(axis=1)
-    filtered["Total Time"] = filtered[web_cols].sum(axis=1)
-    filtered["Recency"] = pd.to_datetime(filtered.get("Last_Visit_Timestamp", datetime.now()), errors="coerce")
+    # Orange Answers
+    if 'Orange' in df.columns and df['Orange'].any():
+        orange_df = df[df['Orange'] == True]
+        for col in ['Buying Reason', 'SFT', 'Budget', 'Floor', 'Handover', 'SiteVisitPreference']:
+            if col in orange_df.columns:
+                unique_vals = sorted(orange_df[col].dropna().unique())
+                selected = st.sidebar.multiselect(col, unique_vals)
+                if selected:
+                    df = df[df[col].isin(selected)]
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Avg Page Depth", round(filtered["Page Depth"].mean(), 2))
-    k2.metric("Avg Total Time", round(filtered["Total Time"].mean(), 2))
-    k3.metric("Recent Visit", str(filtered["Recency"].max().date()) if not filtered["Recency"].isna().all() else "NA")
+    # Micro Market
+    if 'Micro Market' in df:
+        mm_vals = sorted(df['Micro Market'].dropna().unique())
+        micro_filter = st.sidebar.multiselect("Micro Market", mm_vals)
+        if micro_filter:
+            df = df[df['Micro Market'].isin(micro_filter)]
 
-    st.subheader("📋 Filtered Leads")
-    st.dataframe(filtered, use_container_width=True)
+    # Source & NI
+    for col in ['Source', 'NI Reason']:
+        if col in df:
+            vals = sorted(df[col].dropna().unique())
+            pick = st.sidebar.multiselect(col, vals)
+            if pick:
+                df = df[df[col].isin(pick)]
 
+    # Web filters (if present)
+    if web_df is not None:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🧠 Web Events Filters")
+        for page in ['Home', 'Plans', 'Price', 'Location', 'Specification', 'Amenities', 'Media']:
+            op = st.sidebar.selectbox(f"{page} Filter", ["None", ">", ">=", "<", "<=", "="])
+            val = st.sidebar.number_input(f"{page} Time", value=0, step=1)
+            if op != "None":
+                expr = f"`{page}` {op} {val}"
+                df = df.query(expr)
+
+        # Page Depth
+        pd_op = st.sidebar.selectbox("Page Depth", ["None", ">", ">=", "<", "<=", "="])
+        pd_val = st.sidebar.number_input("Page Depth Val", value=0, step=1)
+        if pd_op != "None":
+            df = df.query(f"`Page Depth` {pd_op} {pd_val}")
+
+        # Recency
+        rec_op = st.sidebar.selectbox("Recency (Days)", ["None", ">", ">=", "<", "<=", "="])
+        rec_val = st.sidebar.number_input("Recency Value", value=0, step=1)
+        if rec_op != "None":
+            df = df.query(f"`Recency (Days)` {rec_op} {rec_val}")
+
+    return df
+
+# --- Main ---
+with st.spinner("🔄 Fetching data..."):
+    base_df = fetch_basic_data()
+
+st.success("✅ Basic data loaded")
+
+web_file = st.file_uploader("📁 Upload Web Events Sheet", type="xlsx")
+if web_file:
+    web_df = pd.read_excel(web_file, sheet_name=0)
+    web_df.columns = web_df.columns.str.strip()
+    web_df = calculate_web_metrics(web_df)
+    merged_df = base_df.merge(web_df, on='masterLeadId', how='left')
+    filtered = apply_filters(merged_df, web_df)
 else:
-    st.info("Upload a Web Events Sheet to begin analysis.")
+    filtered = apply_filters(base_df, None)
+
+# --- Show Data ---
+st.subheader("📋 Filtered Leads")
+st.dataframe(filtered, use_container_width=True)
+
+# --- Web KPIs ---
+if web_file and not filtered.empty:
+    st.subheader("📈 Web Engagement KPIs")
+    kpi_cols = ['Page Depth', 'Total Time', 'Recency (Days)']
+    st.bar_chart(filtered[kpi_cols])
+
+# --- Footer ---
+st.caption("Built by Mukund x ChatGPT x Perplexity | Project-Agnostic Dashboard")
