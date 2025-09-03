@@ -25,7 +25,6 @@ def load_sheet(sheet_url):
 def fetch_basic_data():
     try:
         project_sheets = {
-            "Broadway": st.secrets["BROADWAY_SHEET_URL"],
             "Loft Part 1": st.secrets["LOFT_PART1_SHEET_URL"],
             "Loft Part 2": st.secrets["LOFT_PART2_SHEET_URL"],
             "Spectra": st.secrets["SPECTRA_SHEET_URL"],
