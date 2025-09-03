@@ -40,7 +40,14 @@ def fetch_basic_data():
 # --- Page-level KPI Calculations ---
 def calculate_web_metrics(df):
     page_cols = ['Home', 'Plans', 'Price', 'Location', 'Specification', 'Amenities', 'Media']
-    df[page_cols] = df[page_cols].fillna(0)
+    # Only keep columns that exist in the uploaded sheet
+existing_page_cols = [col for col in page_cols if col in df.columns]
+
+if not existing_page_cols:
+    st.warning("⚠️ None of the expected page columns found in the uploaded Web Events sheet.")
+else:
+    df[existing_page_cols] = df[existing_page_cols].fillna(0)
+
     df['Page Depth'] = (df[page_cols] > 0).sum(axis=1)
     df['Total Time'] = df[page_cols].sum(axis=1)
     df['Last Active'] = pd.to_datetime(df['Last Event Timestamp'], errors='coerce')
