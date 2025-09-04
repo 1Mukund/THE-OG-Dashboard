@@ -1,91 +1,92 @@
 import streamlit as st
 import pandas as pd
 import gspread
-import json
-from datetime import datetime
+from google.oauth2 import service_account
 
-st.set_page_config(page_title="📊 Unified Lead + Web Events Dashboard", layout="wide")
-st.title("\ud83d\udcca Unified Lead + Web Events Dashboard")
+st.set_page_config(page_title="Unified Lead + Web Events Dashboard", layout="wide")
 
-# Upload Web Events Sheet
-uploaded_file = st.file_uploader("\ud83d\udcc2 Upload Web Events Sheet (.xlsx)", type=["xlsx"])
+st.title("Unified Lead + Web Events Dashboard")
 
-# Google Sheet URLs (use your real links here)
-sheet_urls = {
-    "Broadway": "https://docs.google.com/spreadsheets/d/1smMVEgiadMWc5HB8TayEsai22qnFy1e5xKkoue3B3G8",
-    "Loft_Part1": "https://docs.google.com/spreadsheets/d/1RHg1ndf9JJpSL2hFFkzImtVsiX8-VE28ZEWPzmRzRg0",
-    "Loft_Part2": "https://docs.google.com/spreadsheets/d/13KF8bupHECjLqW5iyLvzEiZP7UY2gCESAgqLPSRy4fA",
-    "Spire": "https://docs.google.com/spreadsheets/d/1iOb3nml_6eOMm68vDKTi-3qe-PnwFbzspqKcNeDBrVU",
-    "Springs": "https://docs.google.com/spreadsheets/d/11bbM5p_Qotd-NZvD33CcepD5grdpI-0hiVi8JwNyeQs",
-    "Spectra": "https://docs.google.com/spreadsheets/d/1WlN3O8V5wpw1TJQpmc-GfVSmuu4GmKnJ5yMVMu0PQ5Y",
-    "Landmark": "https://docs.google.com/spreadsheets/d/1hmWBJMYCRmTajIr971kNZXgWcnMOY9kKkUpSK93WCwE"
+# -------------------------
+# 1. Authenticate Google Sheets
+# -------------------------
+@st.cache_resource
+def get_gspread_client():
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["google_service_account"],
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    )
+    return gspread.authorize(credentials)
+
+client = get_gspread_client()
+
+# -------------------------
+# 2. Load Each Sheet
+# -------------------------
+PROJECT_SHEETS = {
+    "Broadway": "1smMVEgiadMWc5HB8TayEsai22qnFy1e5xKkoue3B3G8",
+    "Loft_Part2": "13KF8bupHECjLqW5iyLvzEiZP7UY2gCESAgqLPSRy4fA",
+    "Spire": "1iOb3nml_6eOMm68vDKTi-3qe-PnwFbzspqKcNeDBrVU",
+    "Springs": "11bbM5p_Qotd-NZvD33CcepD5grdpI-0hiVi8JwNyeQs",
+    "Spectra": "1WlN3O8V5wpw1TJQpmc-GfVSmuu4GmKnJ5yMVMu0PQ5Y",
+    "Landmark": "1hmWBJMYCRmTajIr971kNZXgWcnMOY9kKkUpSK93WCwE",
+    "Loft_Part1": "1RHg1ndf9JJpSL2hFFkzImtVsiX8-VE28ZEWPzmRzRg0"
 }
 
-@st.cache_data(show_spinner=False)
-def load_all_basic_data():
+@st.cache_data
+def load_basic_data():
     data = {}
+    for name, sheet_id in PROJECT_SHEETS.items():
+        try:
+            sh = client.open_by_key(sheet_id)
+            ws = sh.sheet1
+            df = pd.DataFrame(ws.get_all_records())
+            df['Project'] = name
+            data[name] = df
+        except Exception as e:
+            st.warning(f"Couldn't load sheet for {name}: {e}")
+    if not data:
+        st.error("None of the basic data sheets could be loaded. Please check sheets or permissions.")
+    return pd.concat(data.values(), ignore_index=True) if data else pd.DataFrame()
+
+basic_data = load_basic_data()
+
+# -------------------------
+# 3. Upload Web Events File
+# -------------------------
+st.subheader("Upload Web Events Sheet (.xlsx)")
+uploaded_file = st.file_uploader("Drag and drop file here", type="xlsx")
+
+if uploaded_file:
     try:
-        creds = json.loads(st.secrets["GOOGLE_SHEET_CREDS"])
-        gc = gspread.service_account_from_dict(creds)
+        web_data = pd.read_excel(uploaded_file)
+        if 'masterLeadId' not in web_data.columns:
+            st.error("Uploaded file must contain 'masterLeadId' column.")
+        else:
+            # Clean web data
+            web_data['masterLeadId'] = web_data['masterLeadId'].astype(str)
+            basic_data['masterLeadId'] = basic_data['masterLeadId'].astype(str)
 
-        for name, url in sheet_urls.items():
-            try:
-                sh = gc.open_by_url(url)
-                worksheet = sh.get_worksheet(0)
-                df = pd.DataFrame(worksheet.get_all_records())
-                df["SourceProject"] = name
-                data[name] = df
-            except Exception as e:
-                st.warning(f"Couldn't load sheet for {name}: {e}")
-        return pd.concat(data.values(), ignore_index=True)
-    except Exception as e:
-        st.error("None of the basic data sheets could be loaded. Please check secrets or permissions.")
-        return pd.DataFrame()
+            # Merge
+            merged = pd.merge(basic_data, web_data, on='masterLeadId', how='inner')
 
-# Load all Basic Data Sheets
-basic_data = load_all_basic_data()
+            # Filters
+            st.sidebar.header("Filters")
 
-# Display basic data stats if loaded
-if not basic_data.empty:
-    st.success(f"Loaded {len(basic_data)} rows from {len(sheet_urls)} basic data sheets.")
+            min_call = st.sidebar.slider("Min Call Duration", 0, 1000, 60)
+            score_range = st.sidebar.slider("Score Range", 0.0, 1.0, (0.05, 0.9))
 
-    # Additional Filters + Logic go here
-    st.subheader("\ud83d\udd0d Basic Filters")
-    project_filter = st.multiselect("Filter by Source Project", options=basic_data.SourceProject.unique())
-    if project_filter:
-        basic_data = basic_data[basic_data.SourceProject.isin(project_filter)]
+            filtered = merged[
+                (merged.get("call_duration", 0) >= min_call) &
+                (merged.get("score", 0) >= score_range[0]) &
+                (merged.get("score", 0) <= score_range[1])
+            ]
 
-    st.dataframe(basic_data.head(), use_container_width=True)
+            st.success(f"Loaded and matched {len(filtered)} leads out of {len(basic_data)}")
 
-# Once web events sheet is uploaded
-if uploaded_file is not None:
-    try:
-        web_events = pd.read_excel(uploaded_file)
-        st.success("Web Events sheet uploaded successfully")
-
-        # Merge with basic data (assuming common column `masterLeadId`)
-        if not basic_data.empty:
-            if "masterLeadId" in web_events.columns and "masterLeadId" in basic_data.columns:
-                merged = pd.merge(basic_data, web_events, on="masterLeadId", how="inner")
-
-                st.subheader("\ud83d\udcca Merged Dashboard View")
-                st.write(f"Total Merged Leads: {len(merged)}")
-                st.dataframe(merged.head(), use_container_width=True)
-
-                # Add your filters here as needed
-                # Example: Score filter
-                if "score" in merged.columns:
-                    score_range = st.slider("Score Range", float(merged.score.min()), float(merged.score.max()), (float(merged.score.min()), float(merged.score.max())))
-                    merged = merged[(merged.score >= score_range[0]) & (merged.score <= score_range[1])]
-
-                # Call Duration
-                if "call_duration" in merged.columns:
-                    call_dur = st.slider("Call Duration (in sec)", 0, int(merged.call_duration.max()), (0, int(merged.call_duration.max())))
-                    merged = merged[(merged.call_duration >= call_dur[0]) & (merged.call_duration <= call_dur[1])]
-
-                st.dataframe(merged, use_container_width=True)
-            else:
-                st.error("Missing `masterLeadId` column in either sheet. Merge not possible.")
+            st.dataframe(filtered)
 
     except Exception as e:
-        st.error(f"Error processing Web Events Sheet: {e}")
+        st.error(f"Error processing uploaded web sheet: {e}")
+else:
+    st.info("Please upload the Web Events Sheet (.xlsx) to begin analysis.")
